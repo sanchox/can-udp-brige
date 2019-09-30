@@ -20,11 +20,13 @@
 #include <linux/if.h>
 #include <linux/can.h>
 
-#define DEFAULT_CAN_TX_BUFFER_SIZE 1024*1024
-#define DEFAULT_UDP_TX_BUFFER_SIZE 1024*1024
+#define DEFAULT_CAN_TX_BUFFER_SIZE 256*1024
+#define DEFAULT_UDP_TX_BUFFER_SIZE 256*1024
 
 int can_sock;
+uint64_t rx_can_cnt = 0;
 int udp_sock;
+uint64_t tx_udp_cnt = 0;
 
 typedef struct tx_can_frame_struct {
 	struct can_frame frame;
@@ -47,53 +49,59 @@ pthread_t rx_udp_thread_id = 0;
 pthread_t tx_can_thread_id = 0;
 
 void * tx_udp_thread(void *p) {
-	uint64_t cnt = 0;
+	int nbytes;
 	int current_frame = (int)p;
 	tx_can_frame_t *frame;
 
-//	for ( ; cnt == 0 || current_frame != tx_can_buffer.next_frame ; current_frame++)
-	for ( ; ; current_frame++)
+	for (;;)
 	{
 		if (current_frame == tx_can_buffer.buffer_size) {
 			current_frame = 0;
 		}
-		printf("tx: frame %d\n", current_frame);
-		
 		frame = &tx_can_buffer.frames[current_frame];
 
 		pthread_mutex_lock(&frame->mutex);
-		
+
 		if (frame->sent == true) {
-			fprintf(stderr, "trying to send already sent frame %d\n", current_frame);
 			pthread_mutex_unlock(&frame->mutex);
-	//		return NULL;
 			continue;
 		}
 
-		printf("CAN_ID = 0x%x\n", frame->frame.can_id);
-		printf("DATA = ");
-		for (int i = 0; i < frame->frame.can_dlc; ++i) {
-			printf("0x%02x ", frame->frame.data[i]);
-		}
-		printf("\n");
+//		printf("CAN_ID = 0x%x\n", frame->frame.can_id);
+//		printf("DATA = ");
+//		for (int i = 0; i < frame->frame.can_dlc; ++i) {
+//			printf("0x%02x ", frame->frame.data[i]);
+//		}
+//		printf("\n");
 
 		frame->frame.can_id = htonl(frame->frame.can_id);
 
-		/* send here */
+		nbytes = write(udp_sock, &frame->frame, sizeof(struct can_frame));
+
+		if (nbytes < 0) {
+			perror("udp socket write");
+			exit(EXIT_FAILURE);
+		}
+
+		if (nbytes < sizeof(struct can_frame)) {
+			fprintf(stderr, "write: incomplete write can frame to udp\n");
+			exit(EXIT_FAILURE);
+		}
 
 		frame->sent = true;
 
 		pthread_mutex_unlock(&frame->mutex);
 
-		cnt++;
-		printf("tid = %ld CNT = %lld\n", pthread_self(), cnt);
+		current_frame++;
+		tx_udp_cnt++;
+
+//		printf("tx: tid = %ld frame = %d cnt = %lld\n", pthread_self(), current_frame, tx_udp_cnt);
 	}
 
-	return NULL;	
+	return NULL;
 }
 
 void * rx_can_thread(void *p) {
-	uint64_t cnt = 0;
 	int nbytes;
 	tx_can_frame_t *frame;
 
@@ -101,7 +109,6 @@ void * rx_can_thread(void *p) {
 		if (tx_can_buffer.next_frame == tx_can_buffer.buffer_size) {
 			tx_can_buffer.next_frame = 0;
 		}
-		printf("rx: frame %d\n", tx_can_buffer.next_frame);
 
 		frame = &tx_can_buffer.frames[tx_can_buffer.next_frame];
 
@@ -126,22 +133,19 @@ void * rx_can_thread(void *p) {
 			exit(EXIT_FAILURE);
 		}
 
-		if (tx_udp_thread_id == 0 || !pthread_tryjoin_np(tx_udp_thread_id, NULL)) {
-			pthread_create(&tx_udp_thread_id, NULL, &tx_udp_thread, (void *)tx_can_buffer.next_frame);
-		}
-
-		cnt++;
-
-		printf("RCVD = %lld\n", cnt);
-
 		pthread_mutex_unlock(&frame->mutex);
+
+		rx_can_cnt++;
+
+//		printf("rx: frame = %d cnt = %lld\n", tx_can_buffer.next_frame, rx_can_cnt);
 	}
 
 	return NULL;
 }
 
 int main(int argc, char *argv[]) {
-	struct sockaddr_can addr;
+	struct sockaddr_can can_addr;
+	struct sockaddr_in udp_addr;
 	struct ifreq ifr;
 
 	tx_can_buffer.frames = calloc(DEFAULT_CAN_TX_BUFFER_SIZE, sizeof(tx_can_frame_t));
@@ -158,7 +162,6 @@ int main(int argc, char *argv[]) {
 	}
 
 	can_sock = socket(PF_CAN, SOCK_RAW, CAN_RAW);
-
 	if (can_sock < 0) {
 		perror("can socket create");
 		return EXIT_FAILURE;
@@ -170,19 +173,41 @@ int main(int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	addr.can_family = AF_CAN;
-	addr.can_ifindex = ifr.ifr_ifindex;
+	can_addr.can_family = AF_CAN;
+	can_addr.can_ifindex = ifr.ifr_ifindex;
 
-	if (bind(can_sock, (struct sockaddr *)&addr, sizeof(addr))) {
+	if (bind(can_sock, (struct sockaddr *)&can_addr, sizeof(can_addr))) {
 		perror("can socket bind");
 		return EXIT_FAILURE;
 	}
 
-	if (pthread_create(&rx_can_thread_id, NULL, &rx_can_thread, NULL)) {
-		perror("pthread_create");
+	udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (udp_sock < 0) {
+		perror("udp socket create");
 		return EXIT_FAILURE;
 	}
 
+	udp_addr.sin_family = AF_INET;
+	udp_addr.sin_addr.s_addr = inet_addr("192.168.1.251");
+	udp_addr.sin_port = htons(10000);
+
+	if (connect(udp_sock, (struct sockaddr *)&udp_addr, sizeof(udp_addr)) < 0)
+	{
+		perror("udp socket connect");
+		return EXIT_FAILURE;
+	}
+
+	if (pthread_create(&tx_udp_thread_id, NULL, &tx_udp_thread, (void *) 0)) {
+		perror("tx_udp_pthread_create");
+		return EXIT_FAILURE;
+	}
+
+	if (pthread_create(&rx_can_thread_id, NULL, &rx_can_thread, NULL)) {
+		perror("rx_can_pthread_create");
+		return EXIT_FAILURE;
+	}
+
+	pthread_join(tx_can_thread_id, NULL);
 	pthread_join(rx_can_thread_id, NULL);
 
 	free(tx_can_buffer.frames);
