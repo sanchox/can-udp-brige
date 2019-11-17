@@ -33,18 +33,17 @@ static char doc[] =
 
 /* The options we understand. */
 static struct argp_option options[] = {
-		{ "can-interface", 'i', "INTERFACE", 0, "CAN interface name", 0 },
-		{ "remote-ip-addr", 'a', "R_ADDRESS", 0, "Remote server IP address", 0 },
-		{ "remote-udp-port", 'p', "R_PORT", 0, "Remote server UDP port", 0 },
-		{ "local-udp-port", 'P', "PORT", 0,	"Local UDP port", 0 },
-		{ "buffer-size", 'b', "BUF_SIZE", 0, "Buffer size (optional)", 0 },
+		{ "can-interface", 'I', "INTERFACE", 0, "CAN interface name", 0 },
+		{ "remote-ip-addr", 'i', "R_ADDRESS", 0, "Remote server IP address", 1 },
+		{ "remote-udp-port", 'p', "R_PORT", 0, "Remote server UDP port", 2 },
+		{ "local-udp-port", 'P', "PORT", 0,	"Local UDP port", 3 },
+		{ "buffer-size", 'b', "BUF_SIZE", 0, "Buffer size (optional)", 4 },
 		{ 0 }
 };
 
 /* Program configuration */
 struct arguments {
 	char *can_interface_name;
-	bool udp_tx_ip_set;
 	struct in_addr udp_tx_ip;
 	uint16_t udp_tx_port;
 	uint16_t udp_rx_port;
@@ -79,12 +78,8 @@ typedef struct ctx_struct {
 ctx_t can_rx_udp_tx;
 ctx_t udp_rx_can_tx;
 
-int check_interface_name(const char *interface_name);
-void* rx_thread(void *p);
-void* tx_thread(void *p);
-
 /* Check input string for valid network interface name */
-int check_interface_name(const char *interface_name) {
+static int check_interface_name(const char *interface_name) {
 	if (interface_name == NULL) {
 		printf("Interface name is NULL\n");
 		return (0);
@@ -97,8 +92,7 @@ int check_interface_name(const char *interface_name) {
 
 	/* Get network interfaces list */
 	struct ifaddrs *ifaddr;
-	if (getifaddrs(&ifaddr) == -1)
-	{
+	if (getifaddrs(&ifaddr) == -1) {
 		perror("getifaddrs()");
 		exit(EXIT_FAILURE);
 	}
@@ -123,17 +117,19 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	 */
 	struct arguments *arguments = state->input;
 
+	static int ok_state = 0;
 	switch (key) {
 	case 'I': {
 		if (!check_interface_name(arg))
 			argp_error(state, "No such interface: %s", arg);
 		arguments->can_interface_name = arg;
+		ok_state |= 0x1;
 	}
 		break;
 	case 'i': {
 		if (!inet_aton(arg, &arguments->udp_tx_ip))
 			argp_error(state, "Invalid IP address: %s", arg);
-		arguments->udp_tx_ip_set = true;
+		ok_state |= 0x2;
 	}
 		break;
 	case 'p': {
@@ -141,6 +137,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 		if (port < 1 || port > 65535)
 			argp_error(state, "Invalid UDP port: %d", port);
 		arguments->udp_tx_port = port;
+		ok_state |= 0x4;
 	}
 		break;
 	case 'P': {
@@ -148,6 +145,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 		if (port < 1 || port > 65535)
 			argp_error(state, "Invalid UDP port: %d", port);
 		arguments->udp_rx_port = port;
+		ok_state |= 0x8;
 	}
 		break;
 	case 'b': {
@@ -158,7 +156,10 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	}
 		break;
 	case ARGP_KEY_NO_ARGS:
-		argp_usage(state);
+	case ARGP_KEY_ARG:
+	case ARGP_KEY_END:
+		if (ok_state != 0xF)
+			argp_error(state, "Please specify -I -i -p -P options!");
 		break;
 	default:
 		return (ARGP_ERR_UNKNOWN);
@@ -166,7 +167,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	return (0);
 }
 
-void* tx_thread(void *p) {
+static void* tx_thread(void *p) {
 	ctx_t *ctx = (ctx_t*) p;
 	for (int current_frame = 0;; current_frame++) {
 		int nbytes;
@@ -212,7 +213,7 @@ void* tx_thread(void *p) {
 	return NULL;
 }
 
-void* rx_thread(void *p) {
+static void* rx_thread(void *p) {
 	ctx_t *ctx = (ctx_t*) p;
 	for (;; ctx->buffer.next_frame++) {
 		int nbytes;
@@ -262,19 +263,16 @@ void* rx_thread(void *p) {
 
 int main(int argc, char *argv[]) {
 	/* Initializing arguments structure */
-	struct arguments arguments =
-	{
-		.can_interface_name = NULL,
-		.udp_tx_ip_set = false,
-		.udp_tx_port = 0,
-		.udp_rx_port = 0,
-		.buffer_size = DEFAULT_BUFFER_SIZE
+	struct arguments arguments = {
+			.can_interface_name = NULL,
+			.udp_tx_port = 0,
+			.udp_rx_port = 0,
+			.buffer_size = DEFAULT_BUFFER_SIZE
 	};
 
 	/* Parsing command line arguments */
-	struct argp argp = {options, parse_opt, NULL, doc, 0, 0, 0};
-	if (argp_parse(&argp, argc, argv, 0, 0, &arguments))
-	{
+	struct argp argp = { options, parse_opt, NULL, doc, 0, 0, 0 };
+	if (argp_parse(&argp, argc, argv, 0, 0, &arguments)) {
 		perror("argp_parse()");
 		return EXIT_FAILURE;
 	}
